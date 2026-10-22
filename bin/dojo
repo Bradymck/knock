@@ -1,0 +1,12 @@
+#!/usr/bin/env bash
+# Run one command in a ship's dojo and print what came back.
+# usage: bin/dojo '<command>' [ship] [settle-seconds]
+set -euo pipefail
+cmd=$1; ship=${2:-lonbep-fonrus-datsun-fadsun}; settle=${3:-6}
+mark="knock-dojo-$(date +%s%N)"
+tmux -L "urbit-$ship" send-keys -t "$ship" C-e C-u   # clear any half-typed line
+tmux -L "urbit-$ship" send-keys -t "$ship" "\"$mark\"" Enter
+tmux -L "urbit-$ship" send-keys -t "$ship" "$cmd" Enter
+sleep "$settle"
+tmux -L "urbit-$ship" capture-pane -p -J -t "$ship" -S -3000 | sed -n "/$mark/,\$p" |
+  grep -vE '^\s*$|eyre:|lens-cancel|knock-dojo-|/sys/vane/|^\s*~\[/' | head -80

@@ -1,0 +1,10 @@
+:~
+  title+'Knock'
+  info+'Who\'s there? Link your Urbit ID to your Nockchain address, proven with your Iris wallet.'
+  color+0x1d.1f21
+  version+[0 1 0]
+  website+'https://github.com/Bradymck/knock'
+  license+'MIT'
+  base+'knock'
+  site+/apps/knock
+==

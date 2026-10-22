@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Copy desk/ into a ship's mounted %knock and commit it, then show what
+# the ship printed. usage: bin/sync [ship]   (default: the dev moon)
+set -euo pipefail
+ship=${1:-lonbep-fonrus-datsun-fadsun}
+here=$(cd "$(dirname "$0")/.." && pwd)
+dest="$HOME/urbit/$ship/knock"
+[[ -d $dest ]] || { echo "~$ship has no mounted %knock: run |new-desk %knock then |mount %knock"; exit 1; }
+rsync -a --delete --exclude '.*' "$here/desk/" "$dest/"
+mark="knock-sync-$(date +%s%N)"
+dojo() { tmux -L "urbit-$ship" send-keys -t "$ship" "$1" Enter; }
+tmux -L "urbit-$ship" send-keys -t "$ship" C-e C-u   # clear any half-typed line
+dojo "\"$mark\""
+dojo '|commit %knock'
+# the commit is done once the dojo prompt comes back after our marker
+for _ in $(seq 1 120); do
+  pane=$(tmux -L "urbit-$ship" capture-pane -p -J -t "$ship" -S -2000 | sed -n "/$mark/,\$p")
+  if [[ $(grep -c 'dojo>' <<<"$pane") -ge 2 ]] && tail -1 <<<"$pane" | grep -q 'dojo> *$'; then break; fi
+  sleep 0.5
+done
+grep -vE '^\s*$|eyre:|lens-cancel|knock-sync-' <<<"$pane" | tail -60
