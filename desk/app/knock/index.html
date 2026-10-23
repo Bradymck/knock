@@ -1,0 +1,286 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Knock</title>
+<style>
+  :root {
+    --bg: #f6f5f2; --fg: #1d1f21; --muted: #6b6f73; --card: #ffffff; --line: #e3e1dc;
+    --ok: #1f8f4e; --warn: #a86b12; --bad: #c0392b; --accent: #1d1f21; --accent-fg: #ffffff;
+    --mono: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #111214; --fg: #e8e6e1; --muted: #9a9ea3; --card: #1a1c1f; --line: #2a2d31;
+      --ok: #4cc07f; --warn: #e0a84a; --bad: #ef6a5b; --accent: #e9b949; --accent-fg: #111214;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg);
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 32px 16px 48px; }
+  header h1 { margin: 0; font: 600 28px/1.1 var(--mono); letter-spacing: -0.5px; }
+  header p { margin: 6px 0 24px; color: var(--muted); }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+          padding: 20px; margin-bottom: 16px; }
+  h2 { margin: 0 0 12px; font-size: 15px; font-weight: 600; }
+  .mono { font-family: var(--mono); font-size: 13px; word-break: break-all; }
+  .muted { color: var(--muted); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  button { font: inherit; border-radius: 8px; padding: 8px 14px; cursor: pointer;
+           border: 1px solid var(--line); background: transparent; color: var(--fg); }
+  button.primary { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  button.link { border: 0; padding: 0; color: var(--muted); text-decoration: underline; font-size: 13px; }
+  input { font: 14px var(--mono); flex: 1; min-width: 0; padding: 8px 10px; border-radius: 8px;
+          border: 1px solid var(--line); background: var(--bg); color: var(--fg); }
+  .badge { display: inline-block; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 999px;
+           border: 1px solid currentColor; white-space: nowrap; }
+  .ok { color: var(--ok); } .warn { color: var(--warn); } .bad { color: var(--bad); }
+  ul { list-style: none; padding: 0; margin: 16px 0 0; }
+  li { border-top: 1px solid var(--line); padding: 12px 0; }
+  li .top { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+  .msg { color: var(--bad); font-size: 13px; margin-top: 8px; min-height: 1em; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 24px; }
+  a { color: inherit; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>knock</h1>
+    <p>who's there? <span id="me" class="mono"></span></p>
+  </header>
+
+  <section class="card">
+    <h2>Your Nockchain address</h2>
+    <div id="mine"></div>
+    <div class="msg" id="mine-msg"></div>
+  </section>
+
+  <section class="card">
+    <h2>Knock on a ship</h2>
+    <form id="lookup" class="row">
+      <input id="who" placeholder="~sampel-palnet" autocomplete="off" spellcheck="false">
+      <button class="primary" type="submit">Knock</button>
+    </form>
+    <div class="msg" id="look-msg"></div>
+    <ul id="seen"></ul>
+  </section>
+
+  <footer>
+    Your ship seals your link with its Urbit networking key. Wallet proofs are Nockchain
+    Schnorr signatures from Iris, checked right here in your browser with Nockbox's iris-wasm.
+  </footer>
+</main>
+
+<script type="module">
+const BASE = '/apps/knock';
+const IRIS_STORE = 'https://chromewebstore.google.com/detail/iris-wallet/opodllkjacnodkojeedmgjbogbmfchlb';
+let state = { ship: '', mine: null, seen: [] };
+let wasm = null;
+const proofCache = new Map();
+
+const $ = (id) => document.getElementById(id);
+function h(tag, props = {}, ...kids) {
+  const el = document.createElement(tag);
+  for (const [k, v] of Object.entries(props)) {
+    if (k === 'class') el.className = v;
+    else if (k.startsWith('on')) el.addEventListener(k.slice(2), v);
+    else el.setAttribute(k, v);
+  }
+  for (const kid of kids.flat()) if (kid != null) el.append(kid);
+  return el;
+}
+const when = (secs) => new Date(secs * 1000).toLocaleString();
+
+async function loadWasm() {
+  if (wasm) return wasm;
+  const m = await import(BASE + '/iris-wasm.js');
+  await m.default({ module_or_path: BASE + '/iris-wasm.wasm' });
+  return (wasm = m);
+}
+
+// The full check: the message names this ship and address, the key hashes
+// to the address, and the Schnorr signature over the message is valid.
+async function checkProof(c) {
+  const p = c.proof;
+  if (!p) return { ok: false, level: 'warn', why: 'no wallet proof' };
+  const key = JSON.stringify([c.ship, c.address, p]);
+  if (proofCache.has(key)) return proofCache.get(key);
+  let out;
+  if (!p.msg.includes(`ship: ${c.ship}\n`) || !p.msg.includes(`address: ${c.address}\n`)) {
+    out = { ok: false, level: 'bad', why: 'proof was made for a different ship or address' };
+  } else {
+    try {
+      const w = await loadWasm();
+      const bytes = w.publicKeyToBeBytesVec(p.pub);
+      if (w.hashPublicKey(bytes) !== c.address) out = { ok: false, level: 'bad', why: "signing key doesn't match the address" };
+      else if (!w.verifySignature(bytes, { c: p.c, s: p.s }, p.msg)) out = { ok: false, level: 'bad', why: 'signature is invalid' };
+      else out = { ok: true, level: 'ok', why: 'signed by the address key' };
+    } catch (e) {
+      out = { ok: false, level: 'bad', why: 'could not verify (' + (e.message || e) + ')' };
+    }
+  }
+  proofCache.set(key, out);
+  return out;
+}
+
+async function api(body) {
+  const r = await fetch(BASE + '/api', {
+    method: 'POST', credentials: 'include',
+    headers: { 'content-type': 'application/json', 'x-knock': '1' },
+    body: JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error((await r.text()) || 'HTTP ' + r.status);
+  return r.json();
+}
+async function refresh() {
+  const r = await fetch(BASE + '/state.json', { credentials: 'include' });
+  state = await r.json();
+  await render();
+}
+
+function badge(res) {
+  return h('span', { class: 'badge ' + res.level, title: res.why },
+    res.ok ? '✓ proven' : res.level === 'warn' ? 'claimed' : '✗ ' + res.why);
+}
+
+async function renderMine() {
+  const box = $('mine');
+  box.replaceChildren();
+  const m = state.mine;
+  if (m) {
+    const res = await checkProof(m);
+    box.append(
+      h('div', { class: 'row' }, badge(res), h('span', { class: 'muted' }, 'linked ' + when(m.at))),
+      h('p', { class: 'mono' }, m.address),
+      h('div', { class: 'row' },
+        h('button', { class: res.ok ? '' : 'primary', onclick: linkWithIris }, res.ok ? 'Re-prove with Iris' : 'Prove with Iris'),
+        h('button', { onclick: copy(m.address) }, 'Copy'),
+        h('button', { class: 'link', onclick: unlink }, 'unlink')),
+    );
+  } else {
+    box.append(
+      h('p', { class: 'muted' }, 'Nothing linked yet. Connect Iris to link your address and prove you hold its key.'),
+      h('div', { class: 'row' },
+        h('button', { class: 'primary', onclick: linkWithIris }, 'Link with Iris'),
+        h('button', { class: 'link', onclick: linkManually }, 'or enter an address without proof')),
+    );
+  }
+}
+
+async function renderSeen() {
+  const list = $('seen');
+  const items = [...state.seen].sort((a, b) => b.at - a.at);
+  const rows = await Promise.all(items.map(async (l) => {
+    let status, detail = null;
+    if (l.status === 'pending') status = h('span', { class: 'badge muted' }, 'knocking…');
+    else if (l.status === 'none') status = h('span', { class: 'badge muted' }, 'no address linked');
+    else if (l.status === 'fail') status = h('span', { class: 'badge bad' }, l.why);
+    else {
+      status = badge(await checkProof(l.claim));
+      detail = h('div', {},
+        h('div', { class: 'row' },
+          h('span', { class: 'mono' }, l.claim.address),
+          h('button', { class: 'link', onclick: copy(l.claim.address) }, 'copy')),
+        h('div', { class: 'muted', style: 'font-size:12px' },
+          (l.sealed ? '✓ sealed by ' + l.ship + "'s Urbit key" : 'came straight from ' + l.ship + ' over Urbit (key not checked yet)')
+          + ' · linked ' + when(l.claim.at)));
+    }
+    return h('li', {},
+      h('div', { class: 'top' },
+        h('span', { class: 'mono' }, l.ship),
+        h('span', { class: 'row' }, status,
+          h('button', { class: 'link', onclick: () => knock(l.ship) }, 'again'),
+          h('button', { class: 'link', onclick: () => forget(l.ship) }, 'forget'))),
+      detail);
+  }));
+  list.replaceChildren(...rows);
+}
+
+async function render() {
+  $('me').textContent = state.ship;
+  await Promise.all([renderMine(), renderSeen()]);
+  schedulePoll();
+}
+
+let pollTimer = null, pollStarted = 0;
+function schedulePoll() {
+  clearTimeout(pollTimer);
+  if (!state.seen.some((l) => l.status === 'pending')) { pollStarted = 0; return; }
+  pollStarted ||= Date.now();
+  if (Date.now() - pollStarted > 90_000) {
+    $('look-msg').textContent = "Still waiting. That ship may be offline; try 'again' later.";
+    return;
+  }
+  pollTimer = setTimeout(refresh, 2000);
+}
+
+const say = (where, text) => { $(where).textContent = text || ''; };
+const copy = (text) => () => navigator.clipboard.writeText(text);
+
+async function linkWithIris() {
+  say('mine-msg');
+  const iris = window.nockchain;
+  if (!iris || iris.provider !== 'iris') {
+    $('mine-msg').replaceChildren('Iris wallet not found in this browser. ',
+      h('a', { href: IRIS_STORE, target: '_blank', rel: 'noopener' }, 'Install Iris'), ', then reload.');
+    return;
+  }
+  try {
+    const { account } = await iris.request({ method: 'nock_connect', api: '1.0.0' });
+    if (!account || account.type !== 'v1') throw new Error('switch Iris to a v1 account first');
+    const address = account.address;
+    const nonce = Array.from(crypto.getRandomValues(new Uint8Array(16)), (b) => b.toString(16).padStart(2, '0')).join('');
+    const message = [
+      'knock: link my urbit id to my nockchain address',
+      `ship: ${state.ship}`,
+      `address: ${address}`,
+      `issued: ${new Date().toISOString()}`,
+      `nonce: ${nonce}`,
+      '',
+    ].join('\n');
+    const res = await iris.request({ method: 'nock_signMessage', params: { message }, api: '1.0.0' });
+    const proof = { msg: message, pub: String(res.publicKey), c: res.signature.c, s: res.signature.s };
+    const check = await checkProof({ ship: state.ship, address, proof });
+    if (!check.ok) throw new Error("Iris's signature didn't check out: " + check.why);
+    state = await api({ action: 'set', address, proof });
+    await render();
+  } catch (e) {
+    say('mine-msg', e.message || String(e));
+  }
+}
+
+async function linkManually() {
+  const address = prompt('Nockchain address (base58, starts with a letter or number):');
+  if (!address) return;
+  try { state = await api({ action: 'set', address: address.trim(), proof: null }); await render(); }
+  catch (e) { say('mine-msg', "Your ship rejected that address. Check it's a v1 base58 address."); }
+}
+
+async function unlink() {
+  if (!confirm('Unlink your address? Ships that already looked you up keep their copy until they knock again.')) return;
+  state = await api({ action: 'clear' });
+  await render();
+}
+
+async function knock(ship) {
+  say('look-msg');
+  const who = '~' + ship.trim().replace(/^~/, '');
+  try { state = await api({ action: 'lookup', ship: who }); pollStarted = 0; await render(); }
+  catch (e) { say('look-msg', "That doesn't look like a ship name."); }
+}
+async function forget(ship) { state = await api({ action: 'forget', ship }); await render(); }
+
+$('lookup').addEventListener('submit', (e) => {
+  e.preventDefault();
+  const v = $('who').value;
+  if (v.trim()) { knock(v); $('who').value = ''; }
+});
+
+refresh().catch((e) => say('mine-msg', 'Could not reach your ship: ' + e.message));
+</script>
+</body>
+</html>
